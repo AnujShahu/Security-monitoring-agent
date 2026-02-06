@@ -1,70 +1,149 @@
 import pandas as pd
 import logging
+import os
 from collections import defaultdict
+from datetime import datetime
 
-# ---------------- LOGGING CONFIG ----------------
+# ======================================================
+# LOGGING CONFIGURATION
+# ======================================================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-# ---------------- CONFIG ----------------
+logger = logging.getLogger("SecurityMonitoringAgent")
+
+# ======================================================
+# PATH HANDLING (ABSOLUTE & SAFE)
+# ======================================================
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_PATH = os.path.join(BASE_DIR, "data", "sample_logs.csv")
+
+# ======================================================
+# SECURITY CONFIGURATION
+# ======================================================
 FAILED_LOGIN_THRESHOLD = 3
-SUSPICIOUS_IPS = {"192.168.1.100", "10.0.0.99"}
+HIGH_ACTIVITY_THRESHOLD = 5
 
-# ---------------- FUNCTIONS ----------------
-def load_logs(file_path: str) -> pd.DataFrame:
-    """Load CSV logs"""
-    logging.info("Loading log data...")
-    return pd.read_csv(file_path)
+KNOWN_MALICIOUS_IPS = {
+    "192.168.1.100",
+    "10.0.0.99",
+    "203.0.113.45"
+}
+
+CRITICAL_USERS = {"admin", "root", "itadmin"}
+
+# ======================================================
+# DATA LOADING & NORMALIZATION
+# ======================================================
+def load_logs(path: str) -> pd.DataFrame:
+    logger.info(f"Loading logs from {path}")
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Log file not found: {path}")
+
+    df = pd.read_csv(path)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df
 
 
-def detect_failed_logins(df: pd.DataFrame):
-    """Detect repeated failed login attempts"""
-    logging.info("Analyzing failed logins...")
-    failed = df[df["status"] == "failed"]
-    attempts = defaultdict(int)
+def normalize_logs(df: pd.DataFrame) -> pd.DataFrame:
+    logger.info("Normalizing logs")
 
+    df["event"] = df["event"].str.lower()
+    df["status"] = df["status"].str.lower()
+    df["user"] = df["user"].fillna("unknown")
+
+    return df
+
+# ======================================================
+# DETECTION FUNCTIONS
+# ======================================================
+def detect_bruteforce(df):
     alerts = []
+    counter = defaultdict(int)
 
-    for _, row in failed.iterrows():
-        key = (row["source_ip"], row["user"])
-        attempts[key] += 1
+    for _, row in df.iterrows():
+        if row["event"] == "login" and row["status"] == "failed":
+            key = (row["source_ip"], row["user"])
+            counter[key] += 1
 
-        if attempts[key] == FAILED_LOGIN_THRESHOLD:
-            alerts.append(
-                f"ALERT: {row['source_ip']} has {FAILED_LOGIN_THRESHOLD} failed logins for user {row['user']}"
-            )
-
+            if counter[key] == FAILED_LOGIN_THRESHOLD:
+                alerts.append(
+                    f"BRUTE FORCE ALERT: {row['source_ip']} targeting user {row['user']}"
+                )
     return alerts
 
 
-def detect_threat_intel(df: pd.DataFrame):
-    """Detect known malicious IPs"""
-    logging.info("Checking threat intelligence...")
+def detect_threat_intel(df):
     alerts = []
-
     for ip in df["source_ip"].unique():
-        if ip in SUSPICIOUS_IPS:
-            alerts.append(f"THREAT INTEL ALERT: Known malicious IP detected -> {ip}")
-
+        if ip in KNOWN_MALICIOUS_IPS:
+            alerts.append(
+                f"THREAT INTEL ALERT: Known malicious IP detected -> {ip}"
+            )
     return alerts
 
 
-def run_agent():
-    df = load_logs("data/sample_logs.csv")
+def detect_critical_user_activity(df):
+    alerts = []
+    critical_df = df[df["user"].isin(CRITICAL_USERS)]
 
-    failed_login_alerts = detect_failed_logins(df)
-    threat_alerts = detect_threat_intel(df)
+    for _, row in critical_df.iterrows():
+        if row["status"] == "failed":
+            alerts.append(
+                f"CRITICAL ACCOUNT ALERT: Failed activity on {row['user']} from {row['source_ip']}"
+            )
+    return alerts
 
-    print("\n====== SECURITY ALERTS ======\n")
-    for alert in failed_login_alerts + threat_alerts:
-        print(alert)
 
-    if not failed_login_alerts and not threat_alerts:
+def detect_high_activity_ip(df):
+    alerts = []
+    ip_counts = df["source_ip"].value_counts()
+
+    for ip, count in ip_counts.items():
+        if count >= HIGH_ACTIVITY_THRESHOLD:
+            alerts.append(
+                f"ANOMALY ALERT: High event volume from IP {ip} (events={count})"
+            )
+    return alerts
+
+# ======================================================
+# ALERT DISPLAY
+# ======================================================
+def show_alerts(alerts):
+    print("\n========== SECURITY ALERTS ==========\n")
+
+    if not alerts:
         print("No suspicious activity detected.")
+    else:
+        for alert in alerts:
+            print(alert)
+
+    print("\n====================================\n")
+
+# ======================================================
+# MAIN EXECUTION
+# ======================================================
+def run_agent():
+    start = datetime.now()
+    logger.info("Security Monitoring Agent started")
+
+    df = load_logs(DATA_PATH)
+    df = normalize_logs(df)
+
+    alerts = []
+    alerts.extend(detect_bruteforce(df))
+    alerts.extend(detect_threat_intel(df))
+    alerts.extend(detect_critical_user_activity(df))
+    alerts.extend(detect_high_activity_ip(df))
+
+    show_alerts(alerts)
+
+    end = datetime.now()
+    logger.info(f"Execution time: {(end - start).seconds} seconds")
 
 
-# ---------------- MAIN ----------------
 if __name__ == "__main__":
     run_agent()
